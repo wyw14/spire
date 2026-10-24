@@ -2,6 +2,10 @@
 
 ## [1.16.0] - Unreleased
 
+### Added
+
+- `bundle compare` offline `spire-server` command that semantically compares two SPIFFE-format trust bundle files, reporting added, removed, and changed X.509 authorities and JWT/WIT verification keys, plus separate metadata (sequence number, refresh hint) differences, with exit codes for identical, different, and invalid input
+
 ### Changed
 
 - The `cache_manager`/`expiring_svids` and `cache_manager`/`outdated_svids` samples now carry an `svid_type` label (`X509` or `WIT`), so counts are reported per SVID type

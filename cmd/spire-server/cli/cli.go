@@ -76,6 +76,9 @@ func (cc *CLI) Run(ctx context.Context, args []string) int {
 		"bundle delete": func() (cli.Command, error) {
 			return bundle.NewDeleteCommand(), nil
 		},
+		"bundle compare": func() (cli.Command, error) {
+			return bundle.NewCompareCommand(), nil
+		},
 		"entry count": func() (cli.Command, error) {
 			return entry.NewCountCommand(), nil
 		},

@@ -559,6 +559,28 @@ Deletes bundle data for a trust domain. This command cannot be used to delete th
 | `-mode`       | One of: `restrict`, `dissociate`, `delete`. `restrict` prevents the bundle from being deleted if it is associated to registration entries (i.e. federated with). `dissociate` allows the bundle to be deleted and removes the association from registration entries. `delete` deletes the bundle as well as associated registration entries. | `restrict`                         |
 | `-socketPath` | Path to the SPIRE Server API socket                                                                                                                                                                                                                                                                                                          | /tmp/spire-server/private/api.sock |
 
+### `spire-server bundle compare`
+
+Semantically compares two SPIFFE-format trust bundle files without contacting a server, updating a bundle, or merging the files. It is intended for checking the impact of a bundle rotation ahead of time.
+
+The report separately covers X.509 CA certificates, JWT verification keys, and WIT verification keys:
+
+- X.509 CA certificates are identified by their full certificate contents and reported as added or removed.
+- JWT and WIT public keys are compared within their use by key ID and by their actual public key material. A key ID whose key material changed is explicitly reported as changed.
+- Differences only in entry order or JSON formatting are ignored.
+- Sequence number and refresh hint changes are reported separately as metadata differences.
+- The comparison is rejected when the two bundles declare different trust domains. Because the trust domain is not part of the SPIFFE bundle format, each file can declare it with `-firstTrustDomain` and `-secondTrustDomain`; `-secondTrustDomain` defaults to `-firstTrustDomain`.
+
+Exit status is `0` when the bundles are semantically identical, `1` when the input is invalid (including trust domain mismatch), and `2` when differences are found.
+
+| Command               | Action                                                                                                  | Default |
+|:----------------------|:--------------------------------------------------------------------------------------------------------|:--------|
+| `-first`              | Path to the first SPIFFE-format bundle file. Use `-` to read it from stdin.                             |         |
+| `-second`             | Path to the second SPIFFE-format bundle file. Use `-` to read it from stdin.                            |         |
+| `-firstTrustDomain`   | Trust domain of the first bundle (e.g. `example.org` or `spiffe://example.org`).                        |         |
+| `-secondTrustDomain`  | Trust domain of the second bundle. Defaults to `-firstTrustDomain`. Comparison fails if they differ.    |         |
+| `-output`             | Output format: `pretty` or `json`. The output is stably sorted in both formats.                         | pretty  |
+
 ### `spire-server federation create`
 
 Creates a dynamic federation relationship with a foreign trust domain.
