@@ -30,6 +30,14 @@ const (
 	// FlagWITSVID controls if WIT-SVID and the APIs for it are enabled. When set
 	// to false all WIT-SVID APIs will return Unimplemented.
 	FlagWITSVID Flag = "wit-svid"
+
+	// FlagWorkloadAttestationProvenance controls whether the agent records and
+	// retains workload attestation provenance. When enabled, every attestation
+	// is tagged with a generation and records per-source (workload attestor
+	// plugin) succeeded, failed, pending and skipped outcomes, along with the
+	// request ingress and processing stage. When disabled (the default) no
+	// report is retained and attestation behaves exactly as before.
+	FlagWorkloadAttestationProvenance Flag = "workload-attestation-provenance"
 )
 
 var (
@@ -39,8 +47,9 @@ var (
 		mtx    *sync.RWMutex
 	}{
 		flags: map[Flag]bool{
-			FlagTestFlag: false,
-			FlagWITSVID:  false,
+			FlagTestFlag:                      false,
+			FlagWITSVID:                       false,
+			FlagWorkloadAttestationProvenance: false,
 		},
 		loaded: false,
 		mtx:    new(sync.RWMutex),

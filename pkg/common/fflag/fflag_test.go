@@ -65,6 +65,18 @@ func TestLoad(t *testing.T) {
 			expectError: false,
 			expectUnset: []Flag{FlagTestFlag},
 		},
+		{
+			name:        "defaults the workload attestation provenance flag to off",
+			config:      []string{},
+			expectError: false,
+			expectUnset: []Flag{FlagWorkloadAttestationProvenance},
+		},
+		{
+			name:        "loads the workload attestation provenance flag",
+			config:      []string{string(FlagWorkloadAttestationProvenance)},
+			expectError: false,
+			expectSet:   []Flag{FlagWorkloadAttestationProvenance},
+		},
 	}
 
 	for _, c := range cases {

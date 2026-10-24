@@ -377,6 +377,21 @@ const (
 	// Hint tags registration entry hint
 	Hint = "hint"
 
+	// Ingress tags the entry point through which a request entered
+	Ingress = "ingress"
+
+	// Succeeded tags the count of sources that succeeded
+	Succeeded = "succeeded"
+
+	// Failed tags the count of sources that failed
+	Failed = "failed"
+
+	// Pending tags the count of sources still pending
+	Pending = "pending"
+
+	// Skipped tags the count of sources that were skipped
+	Skipped = "skipped"
+
 	// IDType tags some type of ID (eg. registration ID, SPIFFE ID...)
 	IDType = "id_type"
 

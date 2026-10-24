@@ -2,6 +2,10 @@
 
 ## [1.16.0] - Unreleased
 
+### Added
+
+- Opt-in `workload-attestation-provenance` feature flag on the agent. When enabled, every workload attestation request is tagged with a generation and records per-workload-attestor (source) succeeded, failed, pending and skipped outcomes, along with the request ingress (PID or reference) and processing stage. The records are per-request, so failures from one request never affect subsequent requests; attestation behavior is unchanged when the flag is off
+
 ### Changed
 
 - The `cache_manager`/`expiring_svids` and `cache_manager`/`outdated_svids` samples now carry an `svid_type` label (`X509` or `WIT`), so counts are reported per SVID type
