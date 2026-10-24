@@ -60,6 +60,10 @@ type WITLRUCacheConfig struct {
 	Metrics          telemetry.Metrics
 	SvidCacheMaxSize int
 	Clk              clock.Clock
+
+	// Stats collects workload API response cache statistics. When nil,
+	// statistics are discarded.
+	Stats StatsReporter
 }
 
 func NewWITLRUCache(config WITLRUCacheConfig) *WITLRUCache {
@@ -72,6 +76,7 @@ func NewWITLRUCache(config WITLRUCacheConfig) *WITLRUCache {
 		SvidCacheMaxSize: config.SvidCacheMaxSize,
 		Clk:              config.Clk,
 		SVIDType:         agentmetrics.SVIDTypeWIT,
+		Stats:            config.Stats,
 		BuildUpdate:      buildWITWorkloadUpdate,
 	})
 	return c

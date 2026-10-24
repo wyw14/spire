@@ -79,6 +79,10 @@ type X509LRUCacheConfig struct {
 	SvidCacheMaxSize int
 	Clk              clock.Clock
 
+	// Stats collects workload API response cache statistics. When nil,
+	// statistics are discarded.
+	Stats StatsReporter
+
 	// ShouldPrefetch determines whether a given entry should be prefetched.
 	// If nil, entries are eligible for prefetch unless they disable it via
 	// AdditionalAttributes.
@@ -103,6 +107,7 @@ func NewX509LRUCache(config X509LRUCacheConfig) *X509SVIDLRUCache {
 		SvidCacheMaxSize: config.SvidCacheMaxSize,
 		Clk:              config.Clk,
 		SVIDType:         agentmetrics.SVIDTypeX509,
+		Stats:            config.Stats,
 		BuildUpdate:      buildX509WorkloadUpdate,
 		ShouldPrefetch:   shouldPrefetch,
 	})
@@ -220,7 +225,14 @@ func (c *X509SVIDLRUCache) processTaintedSVIDs(entryIDs []string, taintedX509Aut
 		}
 		if isTainted {
 			taintedSVIDs++
+			var entry *common.RegistrationEntry
+			if record, ok := c.LRUCache.records[entryID]; ok {
+				entry = record.entry
+			}
 			delete(c.LRUCache.svids, entryID)
+			c.LRUCache.stats.RecordEviction(
+				trustDomainFromEntry(entry, c.LRUCache.trustDomain),
+				agentmetrics.SVIDTypeX509, ReasonTainted, 1)
 		}
 	}
 

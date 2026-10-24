@@ -27,7 +27,7 @@ func TestJWTSVIDCache(t *testing.T) {
 	fakeMetrics := fakemetrics.New()
 	log, logHook := test.NewNullLogger()
 	log.Level = logrus.DebugLevel
-	cache := NewJWTSVIDCache(log, fakeMetrics, 8)
+	cache := NewJWTSVIDCache(log, fakeMetrics, 8, nil)
 
 	spiffeID := spiffeid.RequireFromString("spiffe://example.org/blog")
 
@@ -222,7 +222,7 @@ func TestJWTSVIDCache(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			cache := NewJWTSVIDCache(log, fakeMetrics, 8)
+			cache := NewJWTSVIDCache(log, fakeMetrics, 8, nil)
 			if tt.setJWTSVIDsCached != nil {
 				tt.setJWTSVIDsCached(cache)
 			}
@@ -248,7 +248,7 @@ func TestJWTSVIDCacheSize(t *testing.T) {
 	fakeMetrics := fakemetrics.New()
 	log, _ := test.NewNullLogger()
 	log.Level = logrus.DebugLevel
-	cache := NewJWTSVIDCache(log, fakeMetrics, 2)
+	cache := NewJWTSVIDCache(log, fakeMetrics, 2, nil)
 
 	now := time.Now()
 	jwtSvid1 := &client.JWTSVID{Token: "1", IssuedAt: now, ExpiresAt: now.Add(time.Minute)}
@@ -298,7 +298,7 @@ func TestCountJWTSVIDs(t *testing.T) {
 	fakeMetrics := fakemetrics.New()
 	log, _ := test.NewNullLogger()
 	log.Level = logrus.DebugLevel
-	cache := NewJWTSVIDCache(log, fakeMetrics, 2)
+	cache := NewJWTSVIDCache(log, fakeMetrics, 2, nil)
 
 	spiffeID := spiffeid.RequireFromString("spiffe://example.org/blog")
 
@@ -335,7 +335,7 @@ func TestJWTSVIDCacheKeyHashing(t *testing.T) {
 	fakeMetrics := fakemetrics.New()
 	log, _ := test.NewNullLogger()
 	log.Level = logrus.DebugLevel
-	cache := NewJWTSVIDCache(log, fakeMetrics, 8)
+	cache := NewJWTSVIDCache(log, fakeMetrics, 8, nil)
 	cache.SetJWTSVID(spiffeID, []string{"ab", "cd"}, expected)
 
 	// JWT is cached

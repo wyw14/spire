@@ -24,6 +24,7 @@ import (
 type JWTSVIDCache struct {
 	log     logrus.FieldLogger
 	metrics telemetry.Metrics
+	stats   StatsReporter
 	mu      sync.RWMutex
 
 	svids   map[string]*list.Element
@@ -35,6 +36,7 @@ type JWTSVIDCache struct {
 
 type jwtSvidElement struct {
 	key  string
+	td   spiffeid.TrustDomain
 	svid *client.JWTSVID
 }
 
@@ -45,13 +47,14 @@ func (c *JWTSVIDCache) CountJWTSVIDs() int {
 	return len(c.svids)
 }
 
-func NewJWTSVIDCache(log logrus.FieldLogger, metrics telemetry.Metrics, svidCacheMaxSize int) *JWTSVIDCache {
+func NewJWTSVIDCache(log logrus.FieldLogger, metrics telemetry.Metrics, svidCacheMaxSize int, stats StatsReporter) *JWTSVIDCache {
 	if svidCacheMaxSize <= 0 {
 		svidCacheMaxSize = DefaultSVIDCacheMaxSize
 	}
 	return &JWTSVIDCache{
 		metrics:          metrics,
 		log:              log,
+		stats:            statsReporterOrNoop(stats),
 		svids:            make(map[string]*list.Element),
 		lruList:          list.New(),
 		svidCacheMaxSize: svidCacheMaxSize,
@@ -59,7 +62,7 @@ func NewJWTSVIDCache(log logrus.FieldLogger, metrics telemetry.Metrics, svidCach
 }
 
 func (c *JWTSVIDCache) GetJWTSVID(spiffeID spiffeid.ID, audience []string) (*client.JWTSVID, bool) {
-	key := jwtSVIDKey(spiffeID, audience)
+	key := JWTSVIDKey(spiffeID, audience)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -76,28 +79,35 @@ func (c *JWTSVIDCache) GetJWTSVID(spiffeID spiffeid.ID, audience []string) (*cli
 func (c *JWTSVIDCache) SetJWTSVID(spiffeID spiffeid.ID, audience []string, svid *client.JWTSVID) {
 	defer func() { agent.SetJWTSVIDCacheSize(c.metrics, c.CountJWTSVIDs()) }()
 
-	key := jwtSVIDKey(spiffeID, audience)
+	key := JWTSVIDKey(spiffeID, audience)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if len(c.svids) >= c.svidCacheMaxSize {
+	if _, exists := c.svids[key]; !exists && len(c.svids) >= c.svidCacheMaxSize {
 		element := c.lruList.Back()
 		jwtSvidWithHash := element.Value.(jwtSvidElement)
 		delete(c.svids, jwtSvidWithHash.key)
 		c.lruList.Remove(element)
+		c.stats.RecordEviction(jwtSvidWithHash.td, StatsSVIDTypeJWT, ReasonEvicted, 1)
 	}
 
 	svidElement, ok := c.svids[key]
 	if ok {
+		// The cached token is being replaced because it was expiring;
+		// attribute the invalidation to expiry.
+		old := svidElement.Value.(jwtSvidElement)
+		c.stats.RecordEviction(old.td, StatsSVIDTypeJWT, ReasonExpired, 1)
 		svidElement.Value = jwtSvidElement{
 			key:  key,
+			td:   spiffeID.TrustDomain(),
 			svid: svid,
 		}
 		c.lruList.MoveToFront(svidElement)
 	} else {
 		svidElement = c.lruList.PushFront(jwtSvidElement{
 			key:  key,
+			td:   spiffeID.TrustDomain(),
 			svid: svid,
 		})
 		c.svids[key] = svidElement
@@ -126,6 +136,7 @@ func (c *JWTSVIDCache) TaintJWTSVIDs(ctx context.Context, taintedJWTAuthorities 
 		if _, tainted := taintedJWTAuthorities[keyID]; tainted {
 			delete(c.svids, key)
 			c.lruList.Remove(element)
+			c.stats.RecordEviction(jwtSvidElement.td, StatsSVIDTypeJWT, ReasonTainted, 1)
 
 			removedKeyIDs[keyID]++
 			totalCount++
@@ -163,7 +174,9 @@ func getKeyIDFromSVIDToken(svidToken string) (string, error) {
 	return keyID, nil
 }
 
-func jwtSVIDKey(spiffeID spiffeid.ID, audience []string) string {
+// JWTSVIDKey returns the cache key for a JWT-SVID identified by its SPIFFE
+// ID and audience set. The audience order does not affect the key.
+func JWTSVIDKey(spiffeID spiffeid.ID, audience []string) string {
 	h := sha256.New()
 
 	// Form the cache key as the SHA-256 hash of the SPIFFE ID and all the audiences.

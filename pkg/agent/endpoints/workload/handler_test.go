@@ -2242,13 +2242,7 @@ type testParams struct {
 func runTest(t *testing.T, params testParams, fn func(ctx context.Context, client workloadPB.SpiffeWorkloadAPIClient)) {
 	log, logHook := test.NewNullLogger()
 
-	manager := &FakeManager{
-		ca:         params.CA,
-		identities: params.Identities,
-		updates:    params.Updates,
-		witUpdates: params.WITUpdates,
-		err:        params.ManagerErr,
-	}
+	manager := newFakeManager(params)
 
 	handler := workload.New(workload.Config{
 		TrustDomain:                   td,
@@ -2295,6 +2289,26 @@ type FakeManager struct {
 	witUpdates  []*cache.WITWorkloadUpdate
 	subscribers atomic.Int32
 	err         error
+	cacheStats  *cache.Stats
+}
+
+func newFakeManager(params testParams) *FakeManager {
+	return &FakeManager{
+		ca:         params.CA,
+		identities: params.Identities,
+		updates:    params.Updates,
+		witUpdates: params.WITUpdates,
+		err:        params.ManagerErr,
+		cacheStats: cache.NewStats(nil),
+	}
+}
+
+func (m *FakeManager) CacheStats() cache.StatsReporter {
+	return m.cacheStats
+}
+
+func (m *FakeManager) GetCacheStats() []cache.StatsRow {
+	return m.cacheStats.Snapshot()
 }
 
 func (m *FakeManager) MatchingRegistrationEntries([]*common.Selector) []*common.RegistrationEntry {

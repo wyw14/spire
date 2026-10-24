@@ -59,6 +59,10 @@ type LRUCacheConfig[SVID CachedSVID, Update any] struct {
 	// SVIDType identifies the type of SVID stored in the cache.
 	SVIDType string
 
+	// Stats collects workload API response cache statistics. When nil,
+	// statistics are discarded.
+	Stats StatsReporter
+
 	// BuildUpdate constructs the typed update from matching records, SVIDs, and bundles.
 	BuildUpdate func(cache *LRUCache[SVID, Update], set selectorSet) *Update
 
@@ -138,8 +142,10 @@ type LRUCache[SVID CachedSVID, Update any] struct {
 	// selectors holds the selector indices, keyed by a selector key
 	selectors map[selector]*selectorsMapIndex
 
-	// staleEntries holds stale or new registration entries which require new SVID to be stored in cache
-	staleEntries map[string]bool
+	// staleEntries holds stale or new registration entries which require new
+	// SVID to be stored in cache. The value records why the entry was marked
+	// stale (see the Reason* constants).
+	staleEntries map[string]string
 
 	// bundles holds the trust bundles, keyed by trust domain id (i.e. "spiffe://domain.test")
 	bundles map[spiffeid.TrustDomain]*spiffebundle.Bundle
@@ -152,6 +158,9 @@ type LRUCache[SVID CachedSVID, Update any] struct {
 
 	// svidType identifies the type of SVID stored in the cache
 	svidType string
+
+	// stats collects workload API response cache statistics
+	stats StatsReporter
 
 	subscribeBackoffFn func() backoff.BackOff
 
@@ -174,13 +183,14 @@ func NewLRUCache[SVID CachedSVID, Update any](config LRUCacheConfig[SVID, Update
 		trustDomain:  config.TrustDomain,
 		records:      make(map[string]*lruCacheRecord),
 		selectors:    make(map[selector]*selectorsMapIndex),
-		staleEntries: make(map[string]bool),
+		staleEntries: make(map[string]string),
 		bundles: map[spiffeid.TrustDomain]*spiffebundle.Bundle{
 			config.TrustDomain: config.Bundle,
 		},
 		svids:            make(map[string]*SVID),
 		svidCacheMaxSize: maxSize,
 		svidType:         config.SVIDType,
+		stats:            statsReporterOrNoop(config.Stats),
 		clk:              config.Clk,
 		subscribeBackoffFn: func() backoff.BackOff {
 			return backoff.NewBackoff(config.Clk, SVIDSyncInterval)
@@ -231,6 +241,11 @@ func (c *LRUCache[SVID, Update]) FetchWorkloadUpdate(selectors []*common.Selecto
 
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	// A response can be served from the cache when no matching registration
+	// entry is missing its SVID (bundle-only responses are cached too).
+	if !c.missingSVIDRecords(set) {
+		c.stats.RecordHit(c.trustDomain, c.svidType)
+	}
 	return c.buildUpdate(c, set)
 }
 
@@ -265,6 +280,11 @@ func (c *LRUCache[SVID, Update]) UpdateEntries(update *UpdateEntries, checkSVID 
 	defer func() { agentmetrics.SetEntriesMapSize(c.metrics, c.svidType, c.CountRecords()) }()
 	defer c.mu.Unlock()
 
+	// Update bundles with changes, populating a "changed" set that we can
+	// check when processing registration entries to know if they need to spawn
+	// a notification.
+	bundleChanged := make(map[spiffeid.TrustDomain]bool)
+
 	// Remove bundles that no longer exist. The bundle for the agent trust
 	// domain should NOT be removed even if not present (which should only be
 	// the case if there is a bug on the server) since it is necessary to
@@ -273,13 +293,14 @@ func (c *LRUCache[SVID, Update]) UpdateEntries(update *UpdateEntries, checkSVID 
 		if _, ok := update.Bundles[id]; !ok && id != c.trustDomain {
 			c.log.WithField(telemetry.TrustDomainID, id).Debug("Bundle removed")
 			delete(c.bundles, id)
+			// Mark the bundle as changed so subscribers referencing it are
+			// notified with an update that no longer contains it. Without
+			// this notification the last workload update delivered to a
+			// subscriber would keep carrying the now invalidated bundle.
+			bundleChanged[id] = true
 		}
 	}
 
-	// Update bundles with changes, populating a "changed" set that we can
-	// check when processing registration entries to know if they need to spawn
-	// a notification.
-	bundleChanged := make(map[spiffeid.TrustDomain]bool)
 	for id, bundle := range update.Bundles {
 		existing, ok := c.bundles[id]
 		if !(ok && existing.Equal(bundle)) {
@@ -328,7 +349,12 @@ func (c *LRUCache[SVID, Update]) UpdateEntries(update *UpdateEntries, checkSVID 
 			c.delSelectorIndicesRecord(notifySet, record)
 			notifySets = append(notifySets, notifySet)
 			delete(c.records, id)
-			delete(c.svids, id)
+			if _, ok := c.svids[id]; ok {
+				delete(c.svids, id)
+				c.stats.RecordEviction(
+					trustDomainFromEntry(record.entry, c.trustDomain),
+					c.svidType, ReasonEntryRemoved, 1)
+			}
 			// Remove stale entry since, registration entry is no longer on cache.
 			delete(c.staleEntries, id)
 		}
@@ -453,7 +479,14 @@ func (c *LRUCache[SVID, Update]) UpdateEntries(update *UpdateEntries, checkSVID 
 					c.log.WithField("record_id", record.id).
 						WithField("record_timestamp", record.timestamp).
 						Debug("Removing SVID record")
+					var entry *common.RegistrationEntry
+					if cachedRecord, ok := c.records[record.id]; ok {
+						entry = cachedRecord.entry
+					}
 					delete(c.svids, record.id)
+					c.stats.RecordEviction(
+						trustDomainFromEntry(entry, c.trustDomain),
+						c.svidType, ReasonEvicted, 1)
 					extraSize--
 				}
 			}
@@ -462,8 +495,11 @@ func (c *LRUCache[SVID, Update]) UpdateEntries(update *UpdateEntries, checkSVID 
 
 	// Update all stale svids or svids whose registration entry is outdated
 	for id, svid := range c.svids {
-		if _, ok := outdatedEntries[id]; ok || (checkSVID != nil && checkSVID(nil, c.records[id].entry, svid)) {
-			c.staleEntries[id] = true
+		switch _, outdated := outdatedEntries[id]; {
+		case outdated:
+			c.staleEntries[id] = ReasonEntryUpdated
+		case checkSVID != nil && checkSVID(nil, c.records[id].entry, svid):
+			c.staleEntries[id] = ReasonExpired
 		}
 	}
 
@@ -497,6 +533,17 @@ func (c *LRUCache[SVID, Update]) UpdateSVIDs(svids map[string]*SVID) {
 			continue
 		}
 
+		if _, existing := c.svids[entryID]; existing {
+			// The previous SVID is being invalidated. Attribute the
+			// eviction to the refresh reason that marked the entry stale.
+			reason, ok := c.staleEntries[entryID]
+			if !ok {
+				reason = ReasonExpired
+			}
+			c.stats.RecordEviction(
+				trustDomainFromEntry(record.entry, c.trustDomain),
+				c.svidType, reason, 1)
+		}
 		c.svids[entryID] = svid
 		notifySet.Merge(record.entry.Selectors...)
 		log := c.log.WithFields(logrus.Fields{
@@ -567,6 +614,7 @@ func (c *LRUCache[SVID, Update]) subscribeToWorkloadUpdates(ctx context.Context,
 			notifyCallbackFn()
 		}
 		c.notifySub(sub)
+		c.stats.RecordHit(c.trustDomain, c.svidType)
 		return subscriber, nil
 	}
 
@@ -577,9 +625,14 @@ func (c *LRUCache[SVID, Update]) subscribeToWorkloadUpdates(ctx context.Context,
 			if notifyCallbackFn != nil {
 				notifyCallbackFn()
 			}
+			c.stats.RecordHit(c.trustDomain, c.svidType)
 			return subscriber, nil
 		}
 		c.log.WithField(telemetry.Selectors, selectors).Info("Waiting for SVID to get cached")
+		// Account for the subscriber blocked waiting for its SVIDs while the
+		// backoff is in effect. The counter is always released before the
+		// loop iterates or returns, including when the client went away.
+		c.stats.AddWaiters(c.trustDomain, c.svidType, ReasonMiss, 1)
 		// used for testing
 		if notifyCallbackFn != nil {
 			notifyCallbackFn()
@@ -587,9 +640,11 @@ func (c *LRUCache[SVID, Update]) subscribeToWorkloadUpdates(ctx context.Context,
 
 		select {
 		case <-ctx.Done():
+			c.stats.AddWaiters(c.trustDomain, c.svidType, ReasonMiss, -1)
 			subscriber.Finish()
 			return nil, ctx.Err()
 		case <-c.clk.After(bo.NextBackOff()):
+			c.stats.AddWaiters(c.trustDomain, c.svidType, ReasonMiss, -1)
 		}
 	}
 }
@@ -632,7 +687,9 @@ func (c *LRUCache[SVID, Update]) syncSVIDsWithSubscribers() (map[string]struct{}
 	for id, record := range c.records {
 		if record.activeSubscriberCount > 0 {
 			if _, ok := c.svids[record.entry.EntryId]; !ok {
-				c.staleEntries[id] = true
+				// A subscriber is waiting on this SVID; a miss takes
+				// precedence over any previously recorded prefetch reason.
+				c.staleEntries[id] = ReasonMiss
 			}
 			activeSubsByEntryID[id] = struct{}{}
 		}
@@ -650,7 +707,7 @@ func (c *LRUCache[SVID, Update]) syncSVIDsWithSubscribers() (map[string]struct{}
 		}
 		if _, svidCached := c.svids[id]; !svidCached {
 			if _, ok := c.staleEntries[id]; !ok {
-				c.staleEntries[id] = true
+				c.staleEntries[id] = ReasonPrefetch
 			}
 		}
 	}

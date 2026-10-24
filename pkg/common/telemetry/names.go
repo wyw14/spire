@@ -69,6 +69,20 @@ const (
 	// JWTSVIDCacheSize is the gauge that holds the number of cached JWT-SVIDs
 	JWTSVIDCacheSize = "jwt_svid_cache_size"
 
+	// CacheResponseHits is the counter for workload API responses served from
+	// the agent response cache, labeled by trust domain and SVID type.
+	CacheResponseHits = "cache_response_hits"
+
+	// CacheResponseEvictions is the counter for SVIDs invalidated/evicted
+	// from the agent response cache, labeled by trust domain, SVID type and
+	// invalidation reason.
+	CacheResponseEvictions = "cache_response_evictions"
+
+	// CacheResponseWaiters is the gauge for callers currently waiting for the
+	// agent response cache to be filled, labeled by trust domain, SVID type
+	// and wait reason.
+	CacheResponseWaiters = "cache_response_waiters"
+
 	// Keys related to keys used on HCL
 	Keys = "keys"
 

@@ -99,6 +99,15 @@ type Manager interface {
 	// CountJWTSVIDs returns the amount of JWT SVIDs on memory
 	CountJWTSVIDs() int
 
+	// CacheStats returns the shared workload API response cache statistics
+	// recorder, used by the workload API endpoints to record response hits.
+	CacheStats() cache.StatsReporter
+
+	// GetCacheStats returns a point-in-time snapshot of the workload API
+	// response cache statistics (hits, evictions and waiters by trust
+	// domain, SVID type and reason).
+	GetCacheStats() []cache.StatsRow
+
 	// CountSVIDStoreX509SVIDs returns the amount of x509 SVIDs on SVIDStore in-memory cache
 	CountSVIDStoreX509SVIDs() int
 
@@ -129,6 +138,15 @@ type manager struct {
 	witCache *cache.WITLRUCache
 	jwtCache *cache.JWTSVIDCache
 	svid     svid.Rotator
+
+	// cacheStats collects workload API response cache statistics shared by
+	// all the SVID caches.
+	cacheStats *cache.Stats
+
+	// jwtInflightMu protects jwtInflight, which coalesces concurrent
+	// FetchJWTSVID requests for the same SPIFFE ID and audience.
+	jwtInflightMu sync.Mutex
+	jwtInflight   map[string]*jwtFetchCall
 
 	storage storage.Storage
 
@@ -308,6 +326,14 @@ func (m *manager) CountJWTSVIDs() int {
 	return m.jwtCache.CountJWTSVIDs()
 }
 
+func (m *manager) CacheStats() cache.StatsReporter {
+	return m.cacheStats
+}
+
+func (m *manager) GetCacheStats() []cache.StatsRow {
+	return m.cacheStats.Snapshot()
+}
+
 func (m *manager) CountSVIDStoreX509SVIDs() int {
 	return m.svidStoreCache.CountX509SVIDs()
 }
@@ -315,6 +341,14 @@ func (m *manager) CountSVIDStoreX509SVIDs() int {
 // FetchWorkloadUpdates gets the latest workload update for the selectors
 func (m *manager) FetchWorkloadUpdate(selectors []*common.Selector) *cache.X509WorkloadUpdate {
 	return m.x509Cache.FetchWorkloadUpdate(selectors)
+}
+
+// jwtFetchCall represents an in-flight JWT-SVID mint request that
+// concurrent requests for the same SPIFFE ID and audience can wait on.
+type jwtFetchCall struct {
+	done chan struct{}
+	svid *client.JWTSVID
+	err  error
 }
 
 func (m *manager) FetchJWTSVID(ctx context.Context, entry *common.RegistrationEntry, audience []string) (*client.JWTSVID, error) {
@@ -335,12 +369,75 @@ func (m *manager) FetchJWTSVID(ctx context.Context, entry *common.RegistrationEn
 		if ok && !m.c.RotationStrategy.JWTSVIDExpiresSoon(cachedSVID, now) {
 			return cachedSVID, nil
 		}
+
+		// The cached token is missing or expiring. Coalesce concurrent
+		// refreshes for the same SPIFFE ID and audience so only a single
+		// mint request reaches the server; concurrent callers wait for the
+		// leader and are served from the filled cache.
+		if svid, err, joined := m.coalesceJWTSVIDFetch(ctx, spiffeID, audience, entry, cachedSVID, ok, now); joined {
+			return svid, err
+		}
 	}
 
+	return m.mintAndCacheJWTSVID(ctx, entry, audience, spiffeID, cachedSVID, ok, now, bypassCache)
+}
+
+// coalesceJWTSVIDFetch joins an in-flight mint for the same SPIFFE ID and
+// audience, or becomes the leader that performs the mint. joined is false
+// only when a joined caller observed a failed leader and should retry the
+// mint on its own.
+func (m *manager) coalesceJWTSVIDFetch(ctx context.Context, spiffeID spiffeid.ID, audience []string,
+	entry *common.RegistrationEntry, cachedSVID *client.JWTSVID, cached bool, now time.Time,
+) (svid *client.JWTSVID, err error, joined bool) {
+	key := cache.JWTSVIDKey(spiffeID, audience)
+
+	m.jwtInflightMu.Lock()
+	if call, inFlight := m.jwtInflight[key]; inFlight {
+		m.jwtInflightMu.Unlock()
+
+		m.cacheStats.AddWaiters(spiffeID.TrustDomain(), cache.StatsSVIDTypeJWT, cache.ReasonMiss, 1)
+		defer m.cacheStats.AddWaiters(spiffeID.TrustDomain(), cache.StatsSVIDTypeJWT, cache.ReasonMiss, -1)
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err(), true
+		case <-call.done:
+		}
+
+		// Prefer a fresh token the leader stored in the cache.
+		if fresh, freshOK := m.jwtCache.GetJWTSVID(spiffeID, audience); freshOK && !m.c.RotationStrategy.JWTSVIDExpiresSoon(fresh, now) {
+			return fresh, nil, true
+		}
+		if call.err == nil && call.svid != nil {
+			return call.svid, nil, true
+		}
+		// The leader failed; retry the mint independently.
+		return nil, nil, false
+	}
+
+	call := &jwtFetchCall{done: make(chan struct{})}
+	m.jwtInflight[key] = call
+	m.jwtInflightMu.Unlock()
+
+	svid, err = m.mintAndCacheJWTSVID(ctx, entry, audience, spiffeID, cachedSVID, cached, now, false)
+	call.svid = svid
+	call.err = err
+
+	m.jwtInflightMu.Lock()
+	delete(m.jwtInflight, key)
+	m.jwtInflightMu.Unlock()
+	close(call.done)
+
+	return svid, err, true
+}
+
+func (m *manager) mintAndCacheJWTSVID(ctx context.Context, entry *common.RegistrationEntry, audience []string,
+	spiffeID spiffeid.ID, cachedSVID *client.JWTSVID, cached bool, now time.Time, bypassCache bool,
+) (*client.JWTSVID, error) {
 	// Determine if an unexpired JWT-SVID exists in the cache to pass
 	// to NewJWTSVID method. If this is true, we'll fall back to the
 	// cache hit more quickly rather than wait longer for the Server
-	isCacheHit := ok && !rotationutil.JWTSVIDExpired(cachedSVID, now)
+	isCacheHit := cached && !rotationutil.JWTSVIDExpired(cachedSVID, now)
 
 	newSVID, svidSPIFFEID, err := m.client.NewJWTSVID(ctx, entry.EntryId, audience, isCacheHit)
 	switch {

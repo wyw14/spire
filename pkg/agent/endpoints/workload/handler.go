@@ -40,6 +40,9 @@ type Manager interface {
 	MatchingRegistrationEntries(selectors []*common.Selector) []*common.RegistrationEntry
 	FetchJWTSVID(ctx context.Context, entry *common.RegistrationEntry, audience []string) (*client.JWTSVID, error)
 	FetchWorkloadUpdate([]*common.Selector) *cache.X509WorkloadUpdate
+	// CacheStats returns the response cache statistics recorder used to
+	// count workload API responses served from the cache.
+	CacheStats() cache.StatsReporter
 }
 
 type Attestor interface {
@@ -80,6 +83,87 @@ func New(c Config) *Handler {
 	return &Handler{
 		c: c,
 	}
+}
+
+// recordCacheHits records one response cache hit per distinct trust domain
+// for the given SVID type. It is invoked only after a response has actually
+// been delivered to a workload client.
+func (h *Handler) recordCacheHits(trustDomains []spiffeid.TrustDomain, svidType string) {
+	if h.c.Manager == nil {
+		return
+	}
+	stats := h.c.Manager.CacheStats()
+	if stats == nil {
+		return
+	}
+	seen := make(map[spiffeid.TrustDomain]struct{}, len(trustDomains))
+	for _, trustDomain := range trustDomains {
+		if _, ok := seen[trustDomain]; ok {
+			continue
+		}
+		seen[trustDomain] = struct{}{}
+		stats.RecordHit(trustDomain, svidType)
+	}
+}
+
+// trustDomainsFromX509Update returns the trust domains carried by an X509
+// workload update (the agent trust domain bundle and any federated bundles).
+func trustDomainsFromX509Update(update *cache.X509WorkloadUpdate) []spiffeid.TrustDomain {
+	trustDomains := make([]spiffeid.TrustDomain, 0, 1+len(update.FederatedBundles))
+	if update.Bundle != nil {
+		trustDomains = append(trustDomains, update.Bundle.TrustDomain())
+	}
+	for trustDomain := range update.FederatedBundles {
+		trustDomains = append(trustDomains, trustDomain)
+	}
+	return trustDomains
+}
+
+// recordX509IdentityHits records one X509 cache hit per distinct trust
+// domain of the identities delivered to the workload.
+func (h *Handler) recordX509IdentityHits(update *cache.X509WorkloadUpdate) {
+	trustDomains := make([]spiffeid.TrustDomain, 0, len(update.Identities))
+	for _, identity := range update.Identities {
+		id, err := spiffeid.FromString(identity.Entry.SpiffeId)
+		if err != nil {
+			if update.Bundle != nil {
+				trustDomains = append(trustDomains, update.Bundle.TrustDomain())
+			}
+			continue
+		}
+		trustDomains = append(trustDomains, id.TrustDomain())
+	}
+	h.recordCacheHits(trustDomains, cache.StatsSVIDTypeX509)
+}
+
+// recordWITIdentityHits records one WIT cache hit per distinct trust domain
+// of the identities delivered to the workload.
+func (h *Handler) recordWITIdentityHits(update *cache.WITWorkloadUpdate) {
+	trustDomains := make([]spiffeid.TrustDomain, 0, len(update.Identities))
+	for _, identity := range update.Identities {
+		id, err := spiffeid.FromString(identity.Entry.SpiffeId)
+		if err != nil {
+			if update.Bundle != nil {
+				trustDomains = append(trustDomains, update.Bundle.TrustDomain())
+			}
+			continue
+		}
+		trustDomains = append(trustDomains, id.TrustDomain())
+	}
+	h.recordCacheHits(trustDomains, cache.StatsSVIDTypeWIT)
+}
+
+// trustDomainsFromWITUpdate returns the trust domains carried by a WIT
+// workload update (the agent trust domain bundle and any federated bundles).
+func trustDomainsFromWITUpdate(update *cache.WITWorkloadUpdate) []spiffeid.TrustDomain {
+	trustDomains := make([]spiffeid.TrustDomain, 0, 1+len(update.FederatedBundles))
+	if update.Bundle != nil {
+		trustDomains = append(trustDomains, update.Bundle.TrustDomain())
+	}
+	for trustDomain := range update.FederatedBundles {
+		trustDomains = append(trustDomains, trustDomain)
+	}
+	return trustDomains
 }
 
 func (h *Handler) rateLimit(ctx context.Context, fullMethod string, selectors []*common.Selector) error {
@@ -147,7 +231,23 @@ func (h *Handler) FetchJWTSVID(ctx context.Context, req *workload.JWTSVIDRequest
 		return nil, status.Error(codes.PermissionDenied, "no identity issued")
 	}
 
+	h.recordJWTSVIDHits(resp)
+
 	return resp, nil
+}
+
+// recordJWTSVIDHits records one JWT cache hit per distinct trust domain of
+// the SVIDs delivered to the workload.
+func (h *Handler) recordJWTSVIDHits(resp *workload.JWTSVIDResponse) {
+	trustDomains := make([]spiffeid.TrustDomain, 0, len(resp.Svids))
+	for _, svid := range resp.Svids {
+		id, err := spiffeid.FromString(svid.SpiffeId)
+		if err != nil {
+			continue
+		}
+		trustDomains = append(trustDomains, id.TrustDomain())
+	}
+	h.recordCacheHits(trustDomains, cache.StatsSVIDTypeJWT)
 }
 
 // FetchJWTBundles processes request for JWT bundles
@@ -482,6 +582,8 @@ func (h *Handler) sendX509BundlesResponse(update *cache.X509WorkloadUpdate, stre
 		return nil, err
 	}
 
+	h.recordCacheHits(trustDomainsFromX509Update(update), cache.StatsSVIDTypeX509)
+
 	return resp, nil
 }
 
@@ -529,6 +631,8 @@ func (h *Handler) sendX509SVIDResponse(update *cache.X509WorkloadUpdate, stream 
 		loggerWithContextInfo(ctx, log, start, err).Error("Failed to send X.509 SVID response")
 		return err
 	}
+
+	h.recordX509IdentityHits(update)
 
 	log = log.WithField(telemetry.Count, len(resp.Svids))
 
@@ -601,6 +705,8 @@ func (h *Handler) sendWITSVIDResponse(update *cache.WITWorkloadUpdate, stream wo
 		return err
 	}
 
+	h.recordWITIdentityHits(update)
+
 	log.WithField(telemetry.Count, len(resp.Svids)).Debug("Fetched WIT-SVIDs")
 	return nil
 }
@@ -649,6 +755,8 @@ func (h *Handler) sendWITBundlesResponse(update *cache.WITWorkloadUpdate, stream
 		loggerWithContextInfo(ctx, log, start, err).Error("Failed to send WIT bundle response")
 		return nil, err
 	}
+
+	h.recordCacheHits(trustDomainsFromWITUpdate(update), cache.StatsSVIDTypeWIT)
 
 	return resp, nil
 }
@@ -703,6 +811,8 @@ func (h *Handler) sendJWTBundlesResponse(update *cache.X509WorkloadUpdate, strea
 		loggerWithContextInfo(ctx, log, start, err).Error("Failed to send JWT bundle response")
 		return nil, err
 	}
+
+	h.recordCacheHits(trustDomainsFromX509Update(update), cache.StatsSVIDTypeJWT)
 
 	return resp, nil
 }

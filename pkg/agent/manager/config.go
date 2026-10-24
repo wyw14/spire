@@ -107,6 +107,11 @@ func newManager(c *Config) *manager {
 	}
 
 	logger := c.Log.WithField(telemetry.SubsystemName, telemetry.CacheManager)
+
+	// Shared workload API response cache statistics collected by all the
+	// SVID caches and exposed by the manager.
+	cacheStats := managerCache.NewStats(c.Metrics)
+
 	x509Cache := managerCache.NewX509LRUCache(managerCache.X509LRUCacheConfig{
 		Log:              logger,
 		TrustDomain:      c.TrustDomain,
@@ -114,6 +119,7 @@ func newManager(c *Config) *manager {
 		Metrics:          c.Metrics,
 		SvidCacheMaxSize: c.X509SVIDCacheMaxSize,
 		Clk:              c.Clk,
+		Stats:            cacheStats,
 	})
 
 	var witCache *managerCache.WITLRUCache
@@ -125,10 +131,11 @@ func newManager(c *Config) *manager {
 			Metrics:          c.Metrics,
 			SvidCacheMaxSize: c.WITSVIDCacheMaxSize,
 			Clk:              c.Clk,
+			Stats:            cacheStats,
 		})
 	}
 
-	jwtCache := managerCache.NewJWTSVIDCache(logger, c.Metrics, c.JWTSVIDCacheMaxSize)
+	jwtCache := managerCache.NewJWTSVIDCache(logger, c.Metrics, c.JWTSVIDCacheMaxSize, cacheStats)
 
 	bundleCache := managerCache.NewBundleCache(c.TrustDomain, c.Bundle)
 
@@ -157,6 +164,8 @@ func newManager(c *Config) *manager {
 		x509Cache:      x509Cache,
 		witCache:       witCache,
 		jwtCache:       jwtCache,
+		cacheStats:     cacheStats,
+		jwtInflight:    make(map[string]*jwtFetchCall),
 		c:              c,
 		mtx:            new(sync.RWMutex),
 		svid:           svidRotator,

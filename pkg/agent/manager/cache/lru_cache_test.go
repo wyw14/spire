@@ -492,7 +492,7 @@ func TestLRUCacheCheckSVIDCallback(t *testing.T) {
 		return true
 	})
 	assert.Equal(t, 1, callCount)
-	assert.Equal(t, map[string]bool{foo.EntryId: true}, cache.staleEntries)
+	assert.Equal(t, map[string]string{foo.EntryId: ReasonExpired}, cache.staleEntries)
 }
 
 func TestLRUCacheGetStaleEntriesDisablePrefetch(t *testing.T) {
