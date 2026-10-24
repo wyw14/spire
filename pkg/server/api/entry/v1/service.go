@@ -17,6 +17,7 @@ import (
 	"github.com/spiffe/spire/pkg/server/api"
 	"github.com/spiffe/spire/pkg/server/api/rpccontext"
 	"github.com/spiffe/spire/pkg/server/datastore"
+	"github.com/spiffe/spire/pkg/server/registration"
 	"github.com/spiffe/spire/proto/spire/common"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -31,6 +32,11 @@ type Config struct {
 	EntryFetcher  api.AuthorizedEntryFetcher
 	DataStore     datastore.DataStore
 	EntryPageSize int
+
+	// AuditExporter optionally provides the exporter used to serve
+	// registration entry audit exports. When unset, a default exporter
+	// backed by DataStore is used.
+	AuditExporter *registration.AuditExporter
 }
 
 // Service defines the v1 entry service.
@@ -41,6 +47,7 @@ type Service struct {
 	ds            datastore.DataStore
 	ef            api.AuthorizedEntryFetcher
 	entryPageSize int
+	auditExporter *registration.AuditExporter
 }
 
 // New creates a new v1 entry service.
@@ -48,11 +55,17 @@ func New(config Config) *Service {
 	if config.EntryPageSize == 0 {
 		config.EntryPageSize = defaultEntryPageSize
 	}
+	if config.AuditExporter == nil {
+		config.AuditExporter = registration.NewAuditExporter(registration.AuditExporterConfig{
+			DataStore: config.DataStore,
+		})
+	}
 	return &Service{
 		td:            config.TrustDomain,
 		ds:            config.DataStore,
 		ef:            config.EntryFetcher,
 		entryPageSize: config.EntryPageSize,
+		auditExporter: config.AuditExporter,
 	}
 }
 

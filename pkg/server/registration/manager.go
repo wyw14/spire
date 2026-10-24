@@ -27,9 +27,10 @@ type ManagerConfig struct {
 
 // Manager is the manager of registrations
 type Manager struct {
-	c       ManagerConfig
-	log     logrus.FieldLogger
-	metrics telemetry.Metrics
+	c        ManagerConfig
+	log      logrus.FieldLogger
+	metrics  telemetry.Metrics
+	exporter *AuditExporter
 }
 
 // NewManager creates a new registration manager
@@ -42,7 +43,29 @@ func NewManager(c ManagerConfig) *Manager {
 		c:       c,
 		log:     c.Log.WithField(telemetry.RetryInterval, _pruningCadence),
 		metrics: c.Metrics,
+		exporter: NewAuditExporter(AuditExporterConfig{
+			DataStore: c.DataStore,
+			Clock:     c.Clock,
+			Log:       c.Log,
+		}),
 	}
+}
+
+// AuditExporter returns the registration entry audit exporter backing the
+// manager. The exporter keeps the consistent pagination snapshots used to
+// serve audit exports.
+func (m *Manager) AuditExporter() *AuditExporter {
+	return m.exporter
+}
+
+// ExportRegistrationEntries exports a page of redacted registration entry
+// audit records (revision, operator, selector summary and revocation status)
+// filtered by trust domain and creation time range. The export only reads
+// registration entries and never creates, updates or deletes them. Paging is
+// backed by a consistent snapshot, so concurrent entry updates and deletes
+// cannot change the records of an export in progress.
+func (m *Manager) ExportRegistrationEntries(ctx context.Context, req *AuditExportRequest) (*AuditExportResponse, error) {
+	return m.exporter.ExportRegistrationEntries(ctx, req)
 }
 
 // Run runs the registration manager
